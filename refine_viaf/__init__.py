@@ -11,6 +11,7 @@ can operate as an actual web service.
 import collections
 import json
 import logging
+import threading
 import time
 import traceback
 import urllib
@@ -83,11 +84,26 @@ def get_name(record, ns, preferred_sources):
             name = sources_to_names[preferred_source]
             break
 
+    # grab a name arbitrarily: TODO: we should probably specify in our
+    # VIAF query to only search names from our preferred sources, but
+    # I ran into trouble with that approach a while ago. I can't
+    # remember the details. That's why this is here: we try to show
+    # something meaningful.
     if not name and len(sources_to_names) > 0:
-        # grab one arbitrarily, I guess
         name = sources_to_names[sources_to_names.keys()[0]]
 
+    if not name:
+        name = "(Unknown)"
+
     return name
+
+
+def cleanup_soup(soup):
+    """
+    Function that calls decompose() on BeautifulSoup object. This is
+    meant to be passed into a Thread constructor.
+    """
+    soup.decompose()
 
 
 def parse_response_xml(xmlstr, query_type, search_term, preferred_sources):
@@ -130,11 +146,15 @@ def parse_response_xml(xmlstr, query_type, search_term, preferred_sources):
             'match': search_term == name,
         }
 
-        logger.debug(u"parsed match=%s" % (result,))
+        logger.debug(u"parsed match=%r" % (result,))
 
         matches.append(result)
 
         ns_num += 1
+
+    # reclaim memory in separate thread
+    t = threading.Thread(target=cleanup_soup, args=(soup,))
+    t.start()
 
     return matches
 
@@ -165,7 +185,7 @@ def search(query, preferred_sources):
     This is the typical case for reconciliing a name in a particular
     row.
     """
-    logger.debug(u"doing search on query=%s" % (query,))
+    logger.debug(u"doing search on query=%r" % (query,))
 
     query_text = query['query']
     query_type = query.get('type')
@@ -190,12 +210,12 @@ def search(query, preferred_sources):
     url = u"http://www.viaf.org/viaf/search?query=%s&sortKeys=holdingscount&maximumRecords=%s&httpAccept=application/xml" % \
           (query_param_quoted, query.get('limit', 3))
 
-    logger.debug(u"making request for %s" % (url,))
+    logger.debug(u"making request for %r" % (url,))
     response = requests.get(url)
     if response.status_code == 200:
         return parse_response_xml(response.text, query_type, query_text, preferred_sources)
     else:
-        logger.error(u"VIAF API Error: query=%s, HTTP code=%s, response=%s" % (query, response.status_code, response.text))
+        logger.error(u"VIAF API Error: query=%r, HTTP code=%r, response=%r" % (query, response.status_code, response.text))
 
     return []
 
@@ -211,7 +231,7 @@ def search_worker(task):
         result = search(query, preferred_sources)
     except Exception, e:
         tb = traceback.format_exc()
-        logger.error(u"Error occurred in search_worker: %s" % (tb,))
+        logger.error(u"Error occurred in search_worker: %r" % (tb,))
 
     return { key: {"result": result }}
 
@@ -236,7 +256,7 @@ class Reconcile:
         Performs the reconciliation; returns a JSON string response.
         """
 
-        logger.debug("config=%s" % (self.config,))
+        logger.debug("config=%r" % (self.config,))
 
         start_time = time.time()
         num_queries = 0
@@ -250,7 +270,7 @@ class Reconcile:
 
         if query:
 
-            logger.debug(u"query=%s" % (query,))
+            logger.debug(u"query=%r" % (query,))
 
             num_queries = 1
 
@@ -261,7 +281,7 @@ class Reconcile:
 
         elif queries:
 
-            logger.debug(u"queries=%s" % (queries,))
+            logger.debug(u"queries=%r" % (queries,))
             queries = json.loads(queries)
             results = {}
 
@@ -286,7 +306,7 @@ class Reconcile:
             json_response = self.jsonpify(self.request_params, results)
 
         else:
-            metadata = { 'name' : self.config['REFINE_VIAF_SERVICE_NAME']}
+            metadata = { 'name' : self.config['REFINE_VIAF_SERVICE_NAME'] + " - Using names from " + ", ".join(preferred_sources) }
             metadata.update(METADATA)
             json_response = self.jsonpify(self.request_params, metadata)
 
